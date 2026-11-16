@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PaaniLink – Water Tanker Booking and Dispatch</title>
+<style>
+:root{--ink:#10303a;--bg:#eef6f7;--card:#fff;--main:#0b6e8a;--dark:#08475a;--ok:#2a8a4a;--bad:#c0392b;--warn:#b7791f;--line:#cfe1e5}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;font-family:Georgia,"Times New Roman",serif;background:var(--bg);color:var(--ink);line-height:1.5}
+h1,h2,h3,button,label,th,.tab{font-family:"Trebuchet MS",Verdana,sans-serif}
+header{background:linear-gradient(90deg,#08475a,#0b8aa8);color:#fff;padding:.7rem 1rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;justify-content:space-between}
+header h1{margin:0;font-size:1.3rem}
+header span{font-size:.9rem}
+main{max-width:1000px;margin:0 auto;padding:1rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:1rem;margin-bottom:1rem}
+.login{max-width:430px;margin:2rem auto;border-top:5px solid var(--main)}
+.tabs{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem}
+.tab{padding:.5rem .9rem;border:1px solid var(--main);background:#fff;color:var(--main);border-radius:20px;cursor:pointer;font-size:.9rem}
+.tab.on{background:var(--main);color:#fff}
+label{display:block;font-size:.85rem;font-weight:bold;margin:.6rem 0 .2rem}
+input,select,textarea{width:100%;padding:.6rem;border:1px solid #8fb2ba;border-radius:6px;font-size:1rem;font-family:inherit}
+input:focus,select:focus,button:focus{outline:3px solid #7cc4d6}
+.err{color:var(--bad);font-size:.8rem;min-height:1em}
+button{padding:.55rem 1rem;border:0;border-radius:6px;background:var(--main);color:#fff;cursor:pointer;font-size:.9rem;margin:.15rem .15rem .15rem 0}
+button.ok{background:var(--ok)}button.bad{background:var(--bad)}button.gray{background:#5f7a82}
+.stats{display:grid;gap:.7rem;grid-template-columns:repeat(2,1fr)}
+.stat{background:#e1f0f3;border-radius:8px;padding:.7rem;text-align:center}
+.stat b{display:block;font-size:1.5rem;color:var(--dark)}
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th,td{padding:.5rem;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:#e1f0f3}
+td input{width:110px}td select{min-width:120px}
+.badge{display:inline-block;padding:.1rem .55rem;border-radius:10px;font-size:.78rem;background:#dde;font-family:Verdana,sans-serif}
+.Pending,.Disputed{background:#fbeccb;color:var(--warn)}
+.Approved,.Assigned,.Filled,.Ontheway,.Arrived{background:#d3e8f5;color:var(--dark)}
+.Delivered,.Confirmed,.Resolved,.Verified,.Open,.Active{background:#d5efdc;color:var(--ok)}
+.Rejected,.Failed,.Cancelled,.Closed,.Disabled{background:#f6d6d2;color:var(--bad)}
+.msg{padding:.6rem;border-radius:6px;margin-bottom:1rem;background:#d5efdc}
+.msg.e{background:#f6d6d2}
+.trip{border-left:6px solid var(--main)}
+.trip button{width:100%;padding:.9rem;font-size:1.05rem}
+.small{font-size:.82rem;color:#4b6870}
+@media(min-width:700px){.stats{grid-template-columns:repeat(4,1fr)}.trip button{width:auto}}
+</style>
+</head>
+<body>
+<header><h1>PaaniLink</h1><span id="who"></span></header>
+<main id="app" aria-live="polite"></main>
+<script>
+/* ====================================================================
+   PART 1: MOCK API  (acts like the server; later replaced by the real backend)
+   The pages below never touch this part: they only call fetch("/api/...")
+   ==================================================================== */
+const SEED={
+ users:[{id:1,name:"Administrator",username:"admin",password:"123456",role:"admin"}],
+ zones:[],hydrants:[],tankers:[],bookings:[],apps:[],
+ rates:[{id:1,size:1000,price:2000},{id:2,size:3000,price:5000},{id:3,size:6000,price:9000}]
+};
+const KEY="paani_data";
+function load(){try{const d=JSON.parse(localStorage.getItem(KEY));if(d)return d}catch(e){}return JSON.parse(JSON.stringify(SEED))}
+function save(d){try{localStorage.setItem(KEY,JSON.stringify(d))}catch(e){}}
+if(!localStorage.getItem(KEY))save(load());
+
+const realFetch=window.fetch.bind(window);
+window.fetch=async(url,o={})=>{
+  if(!String(url).startsWith("/api/"))return realFetch(url,o);          // only /api/... is mocked
+  const [col,id]=url.slice(5).split("/"),method=o.method||"GET",body=o.body?JSON.parse(o.body):{},d=load();
+  const reply=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json"}});
+  const stamp=s=>({status:s,at:new Date().toLocaleString()});          // booking trace: booking -> confirmation
+  if(!d[col])return reply({error:"Not found"},404);
+  if(method==="GET")return reply(d[col]);
+  if(method==="POST"){
+    body.id=Math.max(0,...d[col].map(r=>r.id))+1;
+    if(col==="bookings")body.history=[stamp(body.status)];
+    d[col].push(body);save(d);return reply(body,201);
+  }
+  const row=d[col].find(r=>r.id==id);
+  if(!row)return reply({error:"Not found"},404);
+  if(col==="bookings"&&body.status)row.history.push(stamp(body.status));
+  Object.assign(row,body);save(d);return reply(row);
+};
+
+/* ====================================================================
+   PART 2: THE WEBSITE  (everything is loaded with fetch)
+   ==================================================================== */
+const SUBSIDY_PERCENT=30, MONTHLY_LIMIT=2, MAX_DAYS_AHEAD=7;          // assumptions (see README)
+const ACTIVE=["Assigned","Filled","On the way","Arrived"], PAID=["Delivered","Confirmed","Resolved"], DEAD=["Cancelled","Rejected","Failed"];
+
+async function api(method,path,body){
+  const r=await fetch("/api/"+path,{method,headers:{"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});
+  const data=await r.json();
+  if(!r.ok)throw new Error(data.error||"Request failed");
+  return data;
+}
+const get=c=>api("GET",c), post=(c,b)=>api("POST",c,b), patch=(c,id,b)=>api("PATCH",c+"/"+id,b);
+const getMany=list=>Promise.all(list.map(get));
+
+/* ---------- HELPERS ---------- */
+let user=null,tab="",notice=null;
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const badge=(s,label)=>`<span class="badge ${s.replace(/ /g,"")}">${esc(label||s)}</span>`;
+const byId=(a,id)=>a.find(x=>x.id==id)||{};
+const iso=d=>new Date(d-d.getTimezoneOffset()*6e4).toISOString().slice(0,10);
+const usedOn=(B,hydrant,date)=>B.filter(b=>b.hydrant==hydrant&&b.date===date&&!DEAD.includes(b.status)).reduce((s,b)=>s+b.size,0);
+const trace=b=>`<span class="small">${(b.history||[]).map(h=>`<span title="${esc(h.at)}">${esc(h.status)}</span>`).join(" → ")}</span>`;
+const tabsFor={customer:["Book tanker","My bookings","Bills","Subsidy"],officer:["Approvals","Subsidy applications","Zone bookings","Disputes"],
+ operator:["Queue","Active trips","Tankers & hydrant"],driver:["My trips"],admin:["Reports","Hydrants & zones","Tankers","Rates","Users"]};
+function msg(t,e){notice={t,e}}
+function setErr(id,t){$("#e_"+id).textContent=t;return !t}
+function table(head,rows){return rows.length?`<div class="tw"><table><thead><tr>${head.map(h=>`<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`:`<p class="small">Nothing here yet.</p>`}
+const btn=(a,id,t,c="")=>`<button class="${c}" data-act="${a}" data-id="${id}">${t}</button>`;
+const options=(list,label,empty="None available")=>list.length?list.map(x=>`<option value="${x.id}">${esc(label(x))}</option>`).join(""):`<option value="">${empty}</option>`;
+
+/* ---------- LOGIN / REGISTER (only customers register; staff accounts are made by the administrator) ---------- */
+async function loginView(reg){
+  $("#who").innerHTML="";
+  $("#app").innerHTML=`<div class="card login"><h2>${reg?"Create customer account":"Log in to PaaniLink"}</h2>
+  ${notice?`<div class="msg ${notice.e?"e":""}">${esc(notice.t)}</div>`:""}
+  ${reg?`<form id="regF" novalidate>
+   <label for="n">Full name</label><input id="n"><div class="err" id="e_n"></div>
+   <label for="c">CNIC (12345-1234567-1)</label><input id="c" inputmode="numeric"><div class="err" id="e_c"></div>
+   <label for="p">Phone (0300-1234567)</label><input id="p" inputmode="tel"><div class="err" id="e_p"></div>
+   <label for="a">Home address</label><input id="a"><div class="err" id="e_a"></div>
+   <label for="z">Zone</label><select id="z"></select><div class="err" id="e_z"></div>
+   <label for="em">Username (letters, numbers, _)</label><input id="em" autocomplete="username"><div class="err" id="e_em"></div>
+   <label for="pw">Password (min 6 characters)</label><input id="pw" type="password" autocomplete="new-password"><div class="err" id="e_pw"></div>
+   <label for="pw2">Confirm password</label><input id="pw2" type="password" autocomplete="new-password"><div class="err" id="e_pw2"></div>
+   <button>Register</button> <button type="button" class="gray" data-act="toLogin">Back to login</button></form>`
+  :`<form id="logF" novalidate>
+   <label for="em">Username</label><input id="em" autocomplete="username"><div class="err" id="e_em"></div>
+   <label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password"><div class="err" id="e_pw"></div>
+   <button>Log in</button> <button type="button" class="gray" data-act="toReg">New customer? Register</button></form>`}
+  </div>`;
+  notice=null;
+  if(reg){const Z=await get("zones");$("#z").innerHTML=options(Z,z=>z.name)}
+}
+async function doLogin(){
+  const em=$("#em").value.trim(),pw=$("#pw").value;
+  let ok=setErr("em",em?"":"Enter your username.");
+  ok=setErr("pw",pw?"":"Enter your password.")&&ok;
+  if(!ok)return;
+  const u=(await get("users")).find(x=>x.username===em&&x.password===pw&&!x.off);
+  if(!u){msg("Wrong username or password (or account disabled).",1);return loginView()}
+  user=u;sessionStorage.paani_login=u.id;tab=tabsFor[u.role][0];render();
+}
+async function doRegister(){
+  const v=id=>$("#"+id).value.trim();
+  let ok=setErr("n",v("n").length>=3?"":"Name must be at least 3 characters.");
+  ok=setErr("c",/^\d{5}-\d{7}-\d$/.test(v("c"))?"":"CNIC must look like 12345-1234567-1.")&&ok;
+  ok=setErr("p",/^03\d{2}-?\d{7}$/.test(v("p"))?"":"Phone must look like 0300-1234567.")&&ok;
+  ok=setErr("a",v("a").length>=10?"":"Address must be at least 10 characters.")&&ok;
+  ok=setErr("z",v("z")?"":"No zone available yet. Ask the administrator to add one.")&&ok;
+  ok=setErr("em",/^[a-z0-9_]{3,}$/i.test(v("em"))?"":"Username: 3+ letters, numbers or _.")&&ok;
+  ok=setErr("pw",$("#pw").value.length>=6?"":"Password must be at least 6 characters.")&&ok;
+  ok=setErr("pw2",$("#pw2").value===$("#pw").value?"":"Passwords do not match.")&&ok;
+  if(!ok)return;
+  const users=await get("users");
+  if(users.some(u=>u.username===v("em"))){setErr("em","This username is already taken.");return}
+  if(users.some(u=>u.cnic===v("c"))){setErr("c","This CNIC is already registered.");return}
+  await post("users",{name:v("n"),cnic:v("c"),phone:v("p"),address:v("a"),zone:+v("z"),username:v("em"),password:$("#pw").value,role:"customer",subsidised:false});
+  msg("Account created. Please log in.");loginView();
+}
+
+/* ---------- MAIN RENDER ---------- */
+async function render(){
+  if(!user)return loginView();
+  $("#who").innerHTML=`${esc(user.name)} (${user.role}) <button class="gray" data-act="logout">Log out</button>`;
+  $("#app").innerHTML=`<div class="tabs" role="tablist">${tabsFor[user.role].map(t=>`<button class="tab ${t===tab?"on":""}" role="tab" aria-selected="${t===tab}" data-act="tab" data-id="${t}">${t}</button>`).join("")}</div>
+   ${notice?`<div class="msg ${notice.e?"e":""}">${esc(notice.t)}</div>`:""}<div id="view"><p>Loading…</p></div>`;
+  notice=null;
+  try{$("#view").innerHTML=await views[user.role](tab);bindForms()}
+  catch(err){$("#view").innerHTML=`<div class="msg e">Something went wrong: ${esc(err.message)}</div>`}
+}
+
+/* ---------- ROLE VIEWS ---------- */
+const views={
+async customer(t){
+  const [B,R,T,D,A]=await getMany(["bookings","rates","tankers","users","apps"]);
+  const me=byId(D,user.id),mine=B.filter(b=>b.customer==user.id);
+  if(t==="Book tanker"){const today=iso(new Date()),max=iso(new Date(Date.now()+MAX_DAYS_AHEAD*864e5));
+   return `<div class="card"><h2>Book a tanker</h2><form id="bookF" novalidate>
+   <label for="size">Tanker size</label><select id="size">${R.map(r=>`<option value="${r.size}">${r.size} gallons – Rs ${r.price}</option>`).join("")}</select>
+   <label for="type">Booking type</label><select id="type"><option value="commercial">Commercial (full rate, no approval)</option>${me.subsidised?`<option value="subsidised">Subsidised (needs officer approval)</option>`:""}</select>
+   ${me.subsidised?"":`<p class="small">Subsidised booking is available after your subsidy is verified (see Subsidy tab).</p>`}
+   <label for="date">Delivery date</label><input id="date" type="date" min="${today}" max="${max}"><div class="err" id="e_date"></div>
+   <label for="addr">Delivery address</label><input id="addr" value="${esc(me.address)}"><div class="err" id="e_addr"></div>
+   <button>Book now</button></form></div>`}
+  if(t==="My bookings")return `<div class="card"><h2>My bookings</h2>${table(["ID","Date","Size","Type","Status","Tanker","Price","Trace","Actions"],
+   mine.map(b=>[b.id,b.date,b.size,b.type,badge(b.status),b.tanker?esc(byId(T,b.tanker).plate):"–","Rs "+b.price,trace(b),
+   (["Pending","Approved"].includes(b.status)?btn("cancel",b.id,"Cancel","bad"):"")+(b.status==="Delivered"?btn("confirm",b.id,"Confirm","ok")+btn("dispute",b.id,"Dispute","bad"):"")]))}</div>`;
+  if(t==="Bills"){const paid=mine.filter(b=>PAID.includes(b.status));
+   return `<div class="card"><h2>Bills</h2>${table(["Booking","Date","Size","Type","Amount"],paid.map(b=>[b.id,b.date,b.size,b.type,"Rs "+b.price]))}
+   <p><b>Total: Rs ${paid.reduce((s,b)=>s+b.price,0)}</b></p></div>`}
+  const app=A.filter(a=>a.customer==user.id),waiting=app.some(a=>a.status==="Pending");
+  return `<div class="card"><h2>Subsidised status</h2><p>Current status: ${me.subsidised?badge("Verified",`Subsidised (${me.category})`):"Not subsidised"}</p>
+   ${table(["Category","Proof","Status"],app.map(a=>[a.category,esc(a.proof),badge(a.status)]))}
+   ${me.subsidised?"":waiting?`<p class="small">Your application is waiting for the zone officer.</p>`:`<form id="appF" novalidate>
+   <label for="cat">Applying as</label><select id="cat"><option value="Household">Low income household</option><option value="Hospital">Hospital</option><option value="Mosque">Mosque</option></select>
+   <label for="proof">Proof details (bill number, income, registration no. etc.)</label><textarea id="proof" rows="3"></textarea><div class="err" id="e_proof"></div><button>Apply for subsidy</button></form>`}</div>`;
+},
+async officer(t){
+  const [B,D,A,T]=await getMany(["bookings","users","apps","tankers"]);
+  const zb=B.filter(b=>b.zone==user.zone);
+  const row=b=>[b.id,esc(byId(D,b.customer).name),b.date,b.size,b.type,badge(b.status)];
+  if(t==="Approvals"){const p=zb.filter(b=>b.status==="Pending");
+   return `<div class="card"><h2>Subsidised bookings waiting for approval</h2>${table(["ID","Customer","Date","Size","Type","Status","Action"],p.map(b=>[...row(b),btn("approve",b.id,"Approve","ok")+btn("reject",b.id,"Reject","bad")]))}</div>`}
+  if(t==="Subsidy applications"){const p=A.filter(a=>byId(D,a.customer).zone==user.zone);
+   return `<div class="card"><h2>Subsidy applications</h2>${table(["Customer","CNIC","Category","Proof","Status","Action"],p.map(a=>[esc(byId(D,a.customer).name),esc(byId(D,a.customer).cnic),a.category,esc(a.proof),badge(a.status),a.status==="Pending"?btn("appok",a.id,"Verify","ok")+btn("appno",a.id,"Reject","bad"):""]))}</div>`}
+  if(t==="Zone bookings")return `<div class="card"><h2>All bookings in my zone (view only)</h2>${table(["ID","Customer","Date","Size","Type","Status","Tanker / driver","Trace"],zb.map(b=>[...row(b),b.tanker?esc(byId(T,b.tanker).plate)+" / "+esc(byId(D,b.driver).name):"–",trace(b)]))}</div>`;
+  const d=zb.filter(b=>b.status==="Disputed");
+  return `<div class="card"><h2>Disputes</h2>${table(["ID","Customer","Date","Size","Type","Status","Action"],d.map(b=>[...row(b),btn("resolve",b.id,"Mark resolved","ok")]))}</div>`;
+},
+async operator(t){
+  const [B,T,U,H]=await getMany(["bookings","tankers","users","hydrants"]);
+  const hy=byId(H,user.hydrant),mine=B.filter(b=>b.hydrant==user.hydrant);
+  const myT=T.filter(x=>x.hydrant==user.hydrant),drivers=U.filter(u=>u.role==="driver"&&u.hydrant==user.hydrant&&!u.off);
+  const busy=(key,id)=>B.some(b=>ACTIVE.includes(b.status)&&b[key]==id);
+  if(t==="Queue"){const q=mine.filter(b=>b.status==="Approved");
+   return `<div class="card"><h2>Approved bookings for ${esc(hy.name)}</h2>${hy.open?"":`<p class="err">Hydrant is marked unavailable.</p>`}
+   ${table(["ID","Date","Size","Address","Assign tanker","Assign driver",""],q.map(b=>[b.id,b.date,b.size,esc(b.address),
+   `<select id="tk${b.id}" aria-label="Tanker for booking ${b.id}">${options(myT.filter(x=>x.available&&x.size===b.size&&!busy("tanker",x.id)),x=>`${x.plate} (${x.size})`)}</select>`,
+   `<select id="dr${b.id}" aria-label="Driver for booking ${b.id}">${options(drivers.filter(x=>!busy("driver",x.id)),x=>x.name)}</select>`,btn("assign",b.id,"Assign","ok")]))}</div>`}
+  if(t==="Active trips"){const a=mine.filter(b=>ACTIVE.includes(b.status));
+   return `<div class="card"><h2>Active trips</h2>${table(["ID","Tanker","Driver","Status","Action"],a.map(b=>[b.id,esc(byId(T,b.tanker).plate),esc(byId(U,b.driver).name),badge(b.status),
+   b.status==="Assigned"?btn("filled",b.id,"Tanker filled"):b.status==="Filled"?btn("left",b.id,"Tanker left hydrant"):""]))}</div>`}
+  return `<div class="card"><h2>${esc(hy.name)}</h2><p>Daily quota: ${hy.quota} gallons · Booked today: ${usedOn(B,hy.id,iso(new Date()))} · Hours ${esc(hy.hours)} · ${hy.open?badge("Open"):badge("Closed")}</p>
+   ${btn("hytoggle",hy.id,hy.open?"Mark hydrant unavailable":"Mark hydrant available",hy.open?"bad":"ok")}</div>
+   <div class="card"><h3>My tankers</h3>${table(["Plate","Size","Available",""],myT.map(x=>[esc(x.plate),x.size,x.available?"Yes":"No",btn("tktoggle",x.id,x.available?"Mark unavailable":"Mark available",x.available?"bad":"ok")]))}</div>`;
+},
+async driver(){
+  const [B,T,U]=await getMany(["bookings","tankers","users"]);
+  const mine=B.filter(b=>b.driver==user.id&&ACTIVE.includes(b.status));
+  return `<h2>My trips</h2>`+(mine.length?mine.map(b=>`<div class="card trip"><h3>Trip #${b.id} ${badge(b.status)}</h3>
+   <p>${esc(b.address)}<br>${b.size} gallons · ${esc(byId(T,b.tanker).plate)} · ${b.date}<br><span class="small">Customer: ${esc(byId(U,b.customer).name)}, ${esc(byId(U,b.customer).phone)}</span></p>
+   ${b.status==="On the way"?btn("arrived",b.id,"Arrived"):""}
+   ${b.status==="Arrived"?btn("delivered",b.id,"Delivered","ok")+`<label for="rs${b.id}">If failed, reason</label><select id="rs${b.id}"><option>House locked</option><option>Road blocked</option><option>Customer not available</option></select>`+btn("failed",b.id,"Failed","bad"):""}
+   ${["Assigned","Filled"].includes(b.status)?`<p class="small">Waiting for the tanker to leave the hydrant.</p>`:""}</div>`).join(""):`<div class="card">No trips assigned to you right now.</div>`);
+},
+async admin(t){
+  const [B,H,T,R,U,Z]=await getMany(["bookings","hydrants","tankers","rates","users","zones"]);
+  const today=iso(new Date());
+  if(t==="Reports"){const c=s=>B.filter(b=>b.status===s).length,paid=B.filter(b=>PAID.includes(b.status));
+   return `<div class="card"><h2>City report</h2><div class="stats">
+   <div class="stat"><b>${B.length}</b>Total bookings</div><div class="stat"><b>${c("Pending")}</b>Awaiting approval</div>
+   <div class="stat"><b>${paid.length}</b>Delivered</div><div class="stat"><b>${c("Failed")}</b>Failed</div>
+   <div class="stat"><b>${c("Disputed")}</b>Disputed</div><div class="stat"><b>${c("Cancelled")+c("Rejected")}</b>Cancelled / rejected</div>
+   <div class="stat"><b>${T.length}</b>Tankers</div><div class="stat"><b>Rs ${paid.reduce((s,b)=>s+b.price,0)}</b>Revenue</div></div></div>
+   <div class="card"><h3>Hydrant quota use today</h3>${table(["Hydrant","Booked today","Daily quota","%"],H.map(h=>{const u=usedOn(B,h.id,today);return [esc(h.name),u,h.quota,Math.round(u/h.quota*100)+"%"]}))}</div>
+   <div class="card"><h3>Bookings per zone</h3>${table(["Zone","Bookings"],Z.map(z=>[esc(z.name),B.filter(b=>b.zone==z.id).length]))}</div>`}
+  if(t==="Hydrants & zones")return `<div class="card"><h2>Hydrants</h2>${table(["Name","Zone","Hours","Daily quota (gallons)",""],H.map(h=>[esc(h.name),esc(byId(Z,h.zone).name),esc(h.hours),`<input id="q${h.id}" type="number" value="${h.quota}" aria-label="Quota for ${esc(h.name)}">`,btn("quota",h.id,"Save")]))}</div>
+   <div class="card"><h3>Add zone</h3><form id="zoneF" novalidate><label for="zn">Zone name</label><input id="zn"><div class="err" id="e_zn"></div><button>Add zone</button></form>${table(["Zones"],Z.map(z=>[esc(z.name)]))}</div>
+   <div class="card"><h3>Add hydrant</h3><form id="hyF" novalidate><label for="hn">Hydrant name</label><input id="hn"><div class="err" id="e_hn"></div>
+   <label for="hz">Zone (a zone can have more than one hydrant)</label><select id="hz">${options(Z,z=>z.name)}</select><div class="err" id="e_hz"></div>
+   <label for="hq">Daily quota (gallons)</label><input id="hq" type="number"><div class="err" id="e_hq"></div>
+   <label for="hh">Operating hours (06:00-20:00)</label><input id="hh" value="06:00-20:00"><div class="err" id="e_hh"></div><button>Add hydrant</button></form></div>`;
+  if(t==="Tankers")return `<div class="card"><h2>Tankers</h2>${table(["Plate","Size","Hydrant","Available"],T.map(x=>[esc(x.plate),x.size,esc(byId(H,x.hydrant).name),x.available?"Yes":"No"]))}
+   <h3>Add tanker</h3><form id="tkF" novalidate><label for="pl">Plate (e.g. KHI-1234)</label><input id="pl"><div class="err" id="e_pl"></div>
+   <label for="sz">Size (gallons)</label><select id="sz">${R.map(r=>`<option value="${r.size}">${r.size}</option>`).join("")}</select>
+   <label for="hy">Hydrant</label><select id="hy">${options(H,h=>h.name)}</select><div class="err" id="e_hy"></div><button>Add tanker</button></form></div>`;
+  if(t==="Rates")return `<div class="card"><h2>Rates (commercial)</h2><p class="small">Subsidised rate = ${SUBSIDY_PERCENT}% of these.</p>${table(["Size (gallons)","Price (Rs)",""],R.map(r=>[r.size,`<input id="r${r.id}" type="number" value="${r.price}" aria-label="Price for ${r.size} gallons">`,btn("rate",r.id,"Save")]))}</div>`;
+  return `<div class="card"><h2>Users</h2>${table(["Name","Username","Role","Status",""],U.map(u=>[esc(u.name),esc(u.username),u.role,u.off?badge("Disabled"):badge("Active"),u.role==="admin"?"":btn("usertoggle",u.id,u.off?"Enable":"Disable",u.off?"ok":"bad")]))}</div>
+   <div class="card"><h3>Add staff user</h3><form id="userF" novalidate>
+   <label for="un">Full name</label><input id="un"><div class="err" id="e_un"></div>
+   <label for="uu">Username</label><input id="uu"><div class="err" id="e_uu"></div>
+   <label for="up">Password (min 6)</label><input id="up" type="password"><div class="err" id="e_up"></div>
+   <label for="ur">Role</label><select id="ur"><option value="officer">Zone Officer</option><option value="operator">Hydrant Operator</option><option value="driver">Driver</option></select>
+   <label for="uz">Zone (for officer)</label><select id="uz">${options(Z,z=>z.name)}</select>
+   <label for="uh">Hydrant (for operator / driver)</label><select id="uh">${options(H,h=>h.name)}</select><div class="err" id="e_uh"></div>
+   <button>Add user</button></form></div>`;
+}};
+
+/* ---------- FORMS ---------- */
+function bindForms(){
+  const f=(id,fn)=>{const e=$("#"+id);if(e)e.onsubmit=async ev=>{ev.preventDefault();try{await fn()}catch(err){msg(err.message,1);render()}}};
+  f("bookF",book);f("appF",applySubsidy);f("zoneF",addZone);f("hyF",addHydrant);f("tkF",addTanker);f("userF",addUser);
+}
+async function book(){
+  const size=+$("#size").value,type=$("#type").value,date=$("#date").value,addr=$("#addr").value.trim();
+  const today=iso(new Date()),max=iso(new Date(Date.now()+MAX_DAYS_AHEAD*864e5));
+  let ok=setErr("date",!date?"Choose a date.":date<today?"Date cannot be in the past.":date>max?`Book at most ${MAX_DAYS_AHEAD} days ahead.`:"");
+  ok=setErr("addr",addr.length>=10?"":"Address must be at least 10 characters.")&&ok;
+  if(!ok)return;
+  const [B,H,R,D]=await getMany(["bookings","hydrants","rates","users"]);
+  const me=byId(D,user.id);
+  if(type==="subsidised"&&me.category==="Household"){
+    const n=B.filter(b=>b.customer==user.id&&b.type==="subsidised"&&!DEAD.includes(b.status)&&b.date.slice(0,7)===date.slice(0,7)).length;
+    if(n>=MONTHLY_LIMIT){msg(`Monthly subsidised limit (${MONTHLY_LIMIT}) reached.`,1);return render()}
+  }
+  const hy=H.find(h=>h.zone==me.zone&&h.open&&h.quota-usedOn(B,h.id,date)>=size);
+  if(!hy){msg("No hydrant in your zone has enough water left on that date.",1);return render()}
+  const full=R.find(r=>r.size===size).price,price=type==="subsidised"?Math.round(full*SUBSIDY_PERCENT/100):full;
+  await post("bookings",{customer:user.id,zone:me.zone,hydrant:hy.id,size,type,date,address:addr,status:type==="subsidised"?"Pending":"Approved",price,tanker:null,driver:null,reason:""});
+  msg(type==="subsidised"?"Booking sent for officer approval.":"Booking confirmed.");tab="My bookings";render();
+}
+async function applySubsidy(){
+  const p=$("#proof").value.trim();
+  if(!setErr("proof",p.length>=10?"":"Write at least 10 characters of proof details."))return;
+  await post("apps",{customer:user.id,category:$("#cat").value,proof:p,status:"Pending"});
+  msg("Application submitted.");render();
+}
+async function addZone(){
+  const n=$("#zn").value.trim();
+  if(!setErr("zn",n.length<3?"Zone name needs 3+ characters.":(await get("zones")).some(z=>z.name.toLowerCase()===n.toLowerCase())?"Zone already exists.":""))return;
+  await post("zones",{name:n});msg("Zone added.");render();
+}
+async function addHydrant(){
+  const n=$("#hn").value.trim(),q=+$("#hq").value,h=$("#hh").value.trim();
+  let ok=setErr("hn",n.length>=3?"":"Name needs 3+ characters.");
+  ok=setErr("hz",$("#hz").value?"":"Add a zone first.")&&ok;
+  ok=setErr("hq",q>=1000?"":"Quota must be at least 1000.")&&ok;
+  ok=setErr("hh",/^\d\d:\d\d-\d\d:\d\d$/.test(h)?"":"Hours must look like 06:00-20:00.")&&ok;if(!ok)return;
+  await post("hydrants",{name:n,zone:+$("#hz").value,quota:q,hours:h,open:true});msg("Hydrant added.");render();
+}
+async function addTanker(){
+  const p=$("#pl").value.trim().toUpperCase();
+  let ok=setErr("pl",/^[A-Z]{3}-\d{3,4}$/.test(p)?"":"Plate must look like KHI-1234.");
+  ok=setErr("hy",$("#hy").value?"":"Add a hydrant first.")&&ok;if(!ok)return;
+  if((await get("tankers")).some(x=>x.plate===p)){setErr("pl","This plate is already registered.");return}
+  await post("tankers",{plate:p,size:+$("#sz").value,hydrant:+$("#hy").value,available:true});msg("Tanker added.");render();
+}
+async function addUser(){
+  const n=$("#un").value.trim(),u=$("#uu").value.trim(),p=$("#up").value,r=$("#ur").value;
+  let ok=setErr("un",n.length>=3?"":"Name needs 3+ characters.");
+  ok=setErr("uu",/^[a-z0-9_]{3,}$/i.test(u)?"":"Username: 3+ letters, numbers or _.")&&ok;
+  ok=setErr("up",p.length>=6?"":"Password needs 6+ characters.")&&ok;
+  ok=setErr("uh",r==="officer"?($("#uz").value?"":"Add a zone first."):($("#uh").value?"":"Add a hydrant first."))&&ok;if(!ok)return;
+  if((await get("users")).some(x=>x.username===u)){setErr("uu","Username already used.");return}
+  const o={name:n,username:u,password:p,role:r};
+  if(r==="officer")o.zone=+$("#uz").value;else o.hydrant=+$("#uh").value;
+  await post("users",o);msg("User added.");render();
+}
+
+/* ---------- BUTTON ACTIONS (one click handler for the whole page) ---------- */
+const getOne=async(c,id)=>byId(await get(c),id);
+const setStatus=(id,status,extra={})=>patch("bookings",id,{status,...extra});
+const actions={
+ toLogin:()=>loginView(),toReg:()=>loginView(true),
+ logout:()=>{user=null;sessionStorage.removeItem("paani_login");loginView()},
+ tab:id=>{tab=id},
+ cancel:async id=>{if(!confirm("Cancel this booking?"))return;await setStatus(id,"Cancelled");msg("Booking cancelled.")},
+ confirm:async id=>{await setStatus(id,"Confirmed");msg("Delivery confirmed. Thank you.")},
+ dispute:async id=>{await setStatus(id,"Disputed");msg("Dispute sent to your zone officer.")},
+ approve:async id=>{await setStatus(id,"Approved");msg("Booking approved.")},
+ reject:async id=>{await setStatus(id,"Rejected");msg("Booking rejected.")},
+ appok:async id=>{const a=await getOne("apps",id);await patch("apps",id,{status:"Verified"});await patch("users",a.customer,{subsidised:true,category:a.category});msg("Customer is now subsidised.")},
+ appno:async id=>{await patch("apps",id,{status:"Rejected"});msg("Application rejected.")},
+ resolve:async id=>{await setStatus(id,"Resolved");msg("Dispute resolved.")},
+ assign:async id=>{
+  const t=$("#tk"+id).value,d=$("#dr"+id).value;
+  if(!t||!d){msg("No suitable available tanker or driver.",1);return}
+  const B=await get("bookings");
+  if(byId(B,id).status!=="Approved"){msg("This booking is no longer waiting for assignment.",1);return}
+  if(B.some(b=>ACTIVE.includes(b.status)&&(b.tanker==t||b.driver==d))){msg("That tanker or driver is already on another trip.",1);return}
+  await setStatus(id,"Assigned",{tanker:+t,driver:+d});msg("Tanker and driver assigned.")},
+ filled:async id=>{await setStatus(id,"Filled");msg("Marked as filled.")},
+ left:async id=>{await setStatus(id,"On the way");msg("Tanker left the hydrant.")},
+ arrived:async id=>{await setStatus(id,"Arrived");msg("Marked as arrived.")},
+ delivered:async id=>{await setStatus(id,"Delivered");msg("Delivery recorded.")},
+ failed:async id=>{await setStatus(id,"Failed",{reason:$("#rs"+id).value});msg("Trip marked as failed.",1)},
+ hytoggle:async id=>{const h=await getOne("hydrants",id);await patch("hydrants",id,{open:!h.open});msg("Hydrant updated.")},
+ tktoggle:async id=>{const t=await getOne("tankers",id);await patch("tankers",id,{available:!t.available});msg("Tanker updated.")},
+ usertoggle:async id=>{const u=await getOne("users",id);await patch("users",id,{off:!u.off});msg("User updated.")},
+ quota:async id=>{const v=+$("#q"+id).value;if(!(v>=1000)){msg("Quota must be at least 1000 gallons.",1);return}await patch("hydrants",id,{quota:v});msg("Quota updated.")},
+ rate:async id=>{const v=+$("#r"+id).value;if(!(v>0)){msg("Enter a valid price.",1);return}await patch("rates",id,{price:v});msg("Rate updated.")}
+};
+document.addEventListener("click",async e=>{
+  const b=e.target.closest("[data-act]");if(!b)return;e.preventDefault();
+  const a=b.dataset.act;
+  try{await actions[a](b.dataset.id)}catch(err){msg(err.message,1)}
+  if(!["toLogin","toReg","logout"].includes(a))render();
+});
+document.addEventListener("submit",e=>{
+  if(e.target.id==="logF"){e.preventDefault();doLogin()}
+  if(e.target.id==="regF"){e.preventDefault();doRegister()}
+});
+/* another tab changed the data: refresh this screen (unless the person is typing) */
+window.addEventListener("storage",e=>{
+  if(e.key===KEY&&user&&!document.activeElement.matches("input,select,textarea"))render();
+});
+(async()=>{
+  try{if(sessionStorage.paani_login){user=(await get("users")).find(u=>u.id==sessionStorage.paani_login&&!u.off);if(user)tab=tabsFor[user.role][0]}}catch(e){}
+  render();
+})();
+</script>
+</body>
+</html>
